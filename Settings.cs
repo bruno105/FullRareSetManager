@@ -36,7 +36,10 @@ namespace FullRareSetManager
             CalcByFreeSpace = new ToggleNode(false);
 
             AutoSell = new ToggleNode(true);
+            DebugKey = Keys.F7;
         }
+        [Menu("Debug Key", 1)]
+        public HotkeyNode DebugKey { get; set; }
 
         [Menu("", "Registering after using DropToInventoryKey to NPC trade inventory")]
         public TextNode SetsAmountStatisticsText { get; set; } = "Total sets sold to vendor: N/A";
@@ -95,5 +98,7 @@ namespace FullRareSetManager
 
         [Menu("Only Allowed Stash Tabs", "Define stash tabs manually to ignore other tabs")]
         public ToggleNode OnlyAllowedStashTabs { get; set; } = new ToggleNode(false);
+        
+        
     }
 }

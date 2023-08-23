@@ -1,7 +1,9 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Windows.Forms;
 using ExileCore;
@@ -9,7 +11,9 @@ using ExileCore.PoEMemory.Components;
 using ExileCore.PoEMemory.Elements;
 using ExileCore.PoEMemory.Elements.InventoryElements;
 using ExileCore.PoEMemory.MemoryObjects;
+using ExileCore.Shared;
 using ExileCore.Shared.Enums;
+using ExileCore.Shared.Interfaces;
 using ExileCore.Shared.Nodes;
 using FullRareSetManager.SetParts;
 using FullRareSetManager.Utilities;
@@ -33,6 +37,7 @@ namespace FullRareSetManager
         public FRSetManagerPublishInformation FrSetManagerPublishInformation = new FRSetManagerPublishInformation();
         private bool _allowScanTabs = true;
         private Stopwatch _fixStopwatch = new Stopwatch();
+        private int _visibleStashIndex = -1;
 
         public override void ReceiveEvent(string eventId, object args)
         {
@@ -60,6 +65,7 @@ namespace FullRareSetManager
         {
             //LogError("Inicialized", 15);
             Input.RegisterKey(Settings.DropToInventoryKey.Value);
+            Input.RegisterKey(Settings.DebugKey.Value);
             _sData = StashData.Load(this);
 
             if (_sData == null)
@@ -82,10 +88,10 @@ namespace FullRareSetManager
 
             UpdateItemsSetsInfo();
 
-            Settings.WeaponTypePriority.SetListValues(new List<string> {"Two handed", "One handed"});
+            Settings.WeaponTypePriority.SetListValues(new List<string> { "Two handed", "One handed" });
 
             Settings.CalcByFreeSpace.OnValueChanged += delegate { UpdateItemsSetsInfo(); };
-            
+
             FrSetManagerPublishInformation = new FRSetManagerPublishInformation();
             //WorldItemsController.OnEntityAdded += args => EntityAdded(args.Entity);
             //WorldItemsController.OnEntityRemoved += args => EntityRemoved(args.Entity);
@@ -118,7 +124,7 @@ namespace FullRareSetManager
             if (visitResult == null)
                 return;
 
-            var index = (int) visitResult.ItemType;
+            var index = (int)visitResult.ItemType;
 
             if (index > 7)
                 index = 0;
@@ -175,7 +181,6 @@ namespace FullRareSetManager
             public int GatheredBelts { get; set; } = 0;
             public int GatheredAmulets { get; set; } = 0;
             public int GatheredRings { get; set; } = 0;
-
             public int WantedSets { get; set; } = 0;
         }
 
@@ -229,7 +234,7 @@ namespace FullRareSetManager
             var needUpdate = UpdatePlayerInventory();
             var IngameState = GameController.Game.IngameState;
             var stashIsVisible = IngameState.IngameUi.StashElement.IsVisible;
-            
+
             if (stashIsVisible)
                 needUpdate = UpdateStashes() || needUpdate;
 
@@ -245,7 +250,7 @@ namespace FullRareSetManager
 
                 try
                 {
-                    DropAllItems();
+
                 }
                 catch
                 {
@@ -263,131 +268,168 @@ namespace FullRareSetManager
 
             RenderLabels();
 
-            if (Settings.DropToInventoryKey.PressedOnce())
-            {
-                if (stashIsVisible && IngameState.IngameUi.InventoryPanel.IsVisible)
-                {
-                    if (_currentSetData.BSetIsReady)
-                        _bDropAllItems = true;
-                }
 
-                SellSetToVendor();
-            }
         }
 
-        public void SellSetToVendor(int callCount = 1)
+
+
+        public override Job Tick()
         {
-            try
+            if (Core.ParallelRunner.FindByName("FRSM_DropItemsToInventory") == null)
             {
-                // Sell to vendor.
-                var gameWindow = GameController.Window.GetWindowRectangle().TopLeft;
-                var latency = (int) GameController.Game.IngameState.ServerData.Latency;
-
-                var npcTradingWindow = GameController.Game.IngameState.IngameUi.SellWindow;
-
-                if (!npcTradingWindow.IsVisible)
+                if (Settings.DropToInventoryKey.PressedOnce())
                 {
-                    // The vendor sell window is not open, but is in memory (it would've went straigth to catch if that wasn't the case).
-                    LogMessage("Error: npcTradingWindow is not visible (opened)!", 5);
-                }
-
-                var playerOfferItems = npcTradingWindow.YourOffer;
-                const int setItemsCount = 9;
-                const int uiButtonsCount = 2;
-
-                LogMessage($"Player has put in {playerOfferItems.ChildCount - uiButtonsCount} in the trading window.", 3);
-
-                if (playerOfferItems.ChildCount < setItemsCount + uiButtonsCount)
-                {
-                    for (var i = 0; i < 8; i++)
+                    var npcTradingWindow = GameController.Game.IngameState.IngameUi.SellWindow.IsVisible ? GameController.Game.IngameState.IngameUi.SellWindow : GameController.Game.IngameState.IngameUi.SellWindowHideout;
+                    var stashWindow = GameController.IngameState.IngameUi.StashElement;
+                    if (stashWindow.IsVisible)
                     {
-                        var itemType = _itemSetTypes[i];
-                        var items = itemType.GetPreparedItems();
-
-                        if (items.Any(item => !item.BInPlayerInventory))
-                            continue;
-
-                        Keyboard.KeyDown(Keys.LControlKey);
-
-                        foreach (var item in items)
-                        {
-                            var foundItem =
-                                GameController.Game.IngameState.IngameUi.InventoryPanel[InventoryIndex.PlayerInventory]
-                                    .VisibleInventoryItems.FirstOrDefault(x => x.X == item.InventPosX && x.Y == item.InventPosY);
-
-                            if (foundItem == null)
-                            {
-                                LogError("FoundItem was null.", 3);
-                                return;
-                            }
-
-                            Thread.Sleep(INPUT_DELAY);
-
-                            Mouse.SetCursorPosAndLeftClick(foundItem.GetClientRect().Center + gameWindow,
-                                Settings.ExtraDelay);
-
-                            Thread.Sleep(latency + Settings.ExtraDelay);
-                        }
+                        StartDropToInventoryRoutine();
                     }
-
-                    Keyboard.KeyUp(Keys.LControlKey);
+                    else if (npcTradingWindow.IsVisible)
+                    {
+                        StartDropToVendorRoutine();
+                    }
+                    else
+                    {
+                        LogMessage("Stash Window or Vendor Window are not found");
+                    }
+                    
                 }
+            }
 
-                Thread.Sleep(INPUT_DELAY + Settings.ExtraDelay.Value);
-                var npcOfferItems = npcTradingWindow.OtherOffer;
+            return null;
 
-                foreach (var element in npcOfferItems.Children)
+        }
+
+        private void StartDropToInventoryRoutine()
+        {
+            Core.ParallelRunner.Run(new Coroutine(DropToInventory(), this, "FRSM_DropItemsToInventory"));
+        }
+
+        private void StartDropToVendorRoutine()
+        {
+            Core.ParallelRunner.Run(new Coroutine(DropToVendor(), this, "FRSM_DropItemsToVendor"));
+        }
+
+
+
+
+        private IEnumerator DropToInventory()
+        {
+
+            yield return DropInventory();
+            StopCoroutine("FRSM_DropItemsToInventory");
+        }
+
+        private IEnumerator DropToVendor()
+        {           
+            yield return DropVendor();
+            StopCoroutine("FRSM_DropItemsToVendor");
+
+        }
+
+
+
+        public IEnumerator DropVendor(int callCount = 1)
+        {
+            var gameWindow = GameController.Window.GetWindowRectangle().TopLeft;
+            var latency = (int)GameController.Game.IngameState.ServerData.Latency;
+
+            var npcTradingWindow = GameController.Game.IngameState.IngameUi.SellWindow.IsVisible ? GameController.Game.IngameState.IngameUi.SellWindow : GameController.Game.IngameState.IngameUi.SellWindowHideout;
+
+            if (!npcTradingWindow.IsVisible)
+            {
+                // The vendor sell window is not open, but is in memory (it would've went straigth to catch if that wasn't the case).
+                LogMessage("Error: npcTradingWindow is not visible (opened)!", 5);
+            }
+
+            var playerOfferItems = npcTradingWindow.YourOffer;
+            const int setItemsCount = 9;
+            const int uiButtonsCount = 2;
+
+            LogMessage($"Player has put in {playerOfferItems.ChildCount - uiButtonsCount} in the trading window.", 3);
+
+            if (playerOfferItems.ChildCount < setItemsCount + uiButtonsCount)
+            {
+                for (var i = 0; i < 8; i++)
                 {
-                    var item = element.AsObject<NormalInventoryItem>().Item;
+                    var itemType = _itemSetTypes[i];
+                    var items = itemType.GetPreparedItems();
 
-                    if (string.IsNullOrEmpty(item.Metadata))
+                    if (items.Any(item => !item.BInPlayerInventory))
                         continue;
 
-                    var itemName = GameController.Files.BaseItemTypes.Translate(item.Metadata).BaseName;
-                    if (itemName == "Chaos Orb" || itemName == "Regal Orb") continue;
-                    LogMessage($"Npc offered '{itemName}'", 3);
-                    if (callCount >= 5) return;
-                    var delay = INPUT_DELAY + Settings.ExtraDelay.Value;
-                    LogMessage($"Trying to sell set again in {delay} ms.", 3);
-                    Thread.Sleep(delay);
+                    Keyboard.KeyDown(Keys.LControlKey);
 
-                    //SellSetToVendor(callCount++);
+                    foreach (var item in items)
+                    {
+                        var foundItem =
+                            GameController.Game.IngameState.ServerData.PlayerInventories[0].Inventory.InventorySlotItems
+                                .FirstOrDefault(x => x.PosX == item.InventPosX && x.PosY == item.InventPosY);
 
-                    return;
+                        if (foundItem == null)
+                        {
+                            LogError("FoundItem was null.", 3);
+                            yield return Delay(5);
+                        }
+
+                        Thread.Sleep(INPUT_DELAY);
+
+                        Mouse.SetCursorPosAndLeftClick(foundItem.GetClientRect().Center + gameWindow,
+                            Settings.ExtraDelay + 50);
+
+                        Thread.Sleep(latency + Settings.ExtraDelay + 50);
+                    }
                 }
 
-                Thread.Sleep(latency + Settings.ExtraDelay);
-                var acceptButton = npcTradingWindow.AcceptButton;
-                Settings.SetsAmountStatistics++;
-                Settings.SetsAmountStatisticsText = $"Total sets sold to vendor: {Settings.SetsAmountStatistics}";
-
-                if (Settings.AutoSell.Value)
-                {
-                    Mouse.SetCursorPosAndLeftClick(acceptButton.GetClientRect().Center + gameWindow,
-                        Settings.ExtraDelay.Value);
-                }
-                else
-                    Mouse.SetCursorPos(acceptButton.GetClientRect().Center + gameWindow);
-            }
-            catch
-            {
-                LogMessage("We hit catch!", 3);
                 Keyboard.KeyUp(Keys.LControlKey);
-                Thread.Sleep(INPUT_DELAY);
-
-                // We are not talking to a vendor.
             }
+
+            Thread.Sleep(INPUT_DELAY + Settings.ExtraDelay.Value);
+            var npcOfferItems = npcTradingWindow.OtherOffer;
+
+            foreach (var element in npcOfferItems.Children)
+            {
+                var item = element.AsObject<NormalInventoryItem>().Item;
+
+                if (string.IsNullOrEmpty(item.Metadata))
+                    continue;
+
+                var itemName = GameController.Files.BaseItemTypes.Translate(item.Metadata).BaseName;
+                if (itemName == "Chaos Orb" || itemName == "Regal Orb") continue;
+                LogMessage($"Npc offered '{itemName}'", 3);
+                if (callCount >= 5) yield return Delay(5);
+                var delay = INPUT_DELAY + Settings.ExtraDelay.Value;
+                LogMessage($"Trying to sell set again in {delay} ms.", 3);
+                Thread.Sleep(delay);
+
+                yield return Delay(5);
+            }
+
+            Thread.Sleep(latency + Settings.ExtraDelay);
+            var acceptButton = npcTradingWindow.AcceptButton;
+            Settings.SetsAmountStatistics++;
+            Settings.SetsAmountStatisticsText = $"Total sets sold to vendor: {Settings.SetsAmountStatistics}";
+
+            if (Settings.AutoSell.Value)
+            {
+                Mouse.SetCursorPosAndLeftClick(acceptButton.GetClientRect().Center + gameWindow,
+                    Settings.ExtraDelay.Value);
+            }
+            else
+                Mouse.SetCursorPos(acceptButton.GetClientRect().Center + gameWindow);
+            yield return Delay(5);
         }
 
-        public void DropAllItems()
+
+        public IEnumerator DropInventory()
         {
             var stashPanel = GameController.IngameState.IngameUi.StashElement;
             var stashNames = stashPanel.AllStashNames;
             var gameWindowPos = GameController.Window.GetWindowRectangle();
-            var latency = (int) GameController.Game.IngameState.ServerData.Latency + Settings.ExtraDelay;
+            var latency = (int)GameController.Game.IngameState.ServerData.Latency + Settings.ExtraDelay;
             var cursorPosPreMoving = Mouse.GetCursorPosition();
 
-            // Iterrate through all the different item types.
             for (var i = 0; i < 8; i++) //Check that we have enough items for any set
             {
                 var part = _itemSetTypes[i];
@@ -396,87 +438,79 @@ namespace FullRareSetManager
                 Keyboard.KeyDown(Keys.LControlKey);
                 Thread.Sleep(INPUT_DELAY);
 
-                try
+
+                foreach (var curPreparedItem in items)
                 {
-                    foreach (var curPreparedItem in items)
+                    // If items is already in our inventory, move on.
+                    if (curPreparedItem.BInPlayerInventory)
+                        continue;
+
+                    // Get the index of the item we want to move from stash to inventory.
+                    var invIndex = stashNames.IndexOf(curPreparedItem.StashName);
+
+                    var indexOfCurrentVisibleTab = GameController.Game.IngameState.IngameUi.StashElement.IndexVisibleStash;
+                    if (indexOfCurrentVisibleTab != invIndex)
                     {
-                        // If items is already in our inventory, move on.
-                        if (curPreparedItem.BInPlayerInventory)
-                            continue;
+                        yield return SwitchToTab(invIndex);
+                    }
 
-                        // Get the index of the item we want to move from stash to inventory.
-                        var invIndex = stashNames.IndexOf(curPreparedItem.StashName);
 
-                        // Switch to the tab we want to go to.
-                        if (!_inventDrop.SwitchToTab(invIndex, Settings))
+                    Thread.Sleep(latency + Settings.ExtraDelay);
+
+                    // Get the current visible stash tab.
+                    _currentOpenedStashTab = stashPanel.AllInventories[invIndex];
+
+                    var item = curPreparedItem;
+
+                    var foundItem =
+                        _currentOpenedStashTab.VisibleInventoryItems.FirstOrDefault(
+                            x => x.X == item.InventPosX && x.Y == item.InventPosY);
+
+                    var curItemsCount = _currentOpenedStashTab.VisibleInventoryItems.Count;
+
+                    if (foundItem != null)
+                    {
+                        // If we found the item.
+                        Mouse.SetCursorPosAndLeftClick(foundItem.GetClientRect().Center + gameWindowPos.TopLeft,
+                            Settings.ExtraDelay);
+
+                        item.BInPlayerInventory = true;
+                        Thread.Sleep(latency + 100 + Settings.ExtraDelay);
+
+                        if (_currentOpenedStashTab.VisibleInventoryItems.Count == curItemsCount)
                         {
-                            //throw new Exception("Can't switch to tab");
-                            Keyboard.KeyUp(Keys.LControlKey);
-                            return;
-                        }
-
-                        Thread.Sleep(latency + Settings.ExtraDelay);
-
-                        // Get the current visible stash tab.
-                        _currentOpenedStashTab = stashPanel.VisibleStash;
-
-                        var item = curPreparedItem;
-
-                        var foundItem =
-                            _currentOpenedStashTab.VisibleInventoryItems.FirstOrDefault(
-                                x => x.X == item.InventPosX && x.Y == item.InventPosY);
-
-                        var curItemsCount = _currentOpenedStashTab.VisibleInventoryItems.Count;
-
-                        if (foundItem != null)
-                        {
-                            // If we found the item.
-                            Mouse.SetCursorPosAndLeftClick(foundItem.GetClientRect().Center + gameWindowPos.TopLeft,
-                                Settings.ExtraDelay);
-
-                            item.BInPlayerInventory = true;
-                            Thread.Sleep(latency + 100 + Settings.ExtraDelay);
+                            //LogError("Item was not dropped?? : " + curPreparedItem.ItemName + ", checking again...", 10);
+                            Thread.Sleep(200);
 
                             if (_currentOpenedStashTab.VisibleInventoryItems.Count == curItemsCount)
                             {
-                                //LogError("Item was not dropped?? : " + curPreparedItem.ItemName + ", checking again...", 10);
-                                Thread.Sleep(200);
-
-                                if (_currentOpenedStashTab.VisibleInventoryItems.Count == curItemsCount)
-                                {
-                                    LogError("Item was not dropped after additional delay: " + curPreparedItem.ItemName,
-                                        5);
-                                }
+                                LogError("Item was not dropped after additional delay: " + curPreparedItem.ItemName,
+                                    5);
                             }
                         }
-                        else
-                        {
-                            LogError("We couldn't find the item we where looking for.\n" +
-                                     $"ItemName: {item.ItemName}.\n" +
-                                     $"Inventory Position: ({item.InventPosX},{item.InventPosY})", 5);
-                        }
-
-                        //Thread.Sleep(200);
-                        if (!UpdateStashes())
-                            LogError("There was item drop but it don't want to update stash!", 10);
                     }
-                }
-                catch (Exception ex)
-                {
-                    LogError("Error move items: " + ex.Message, 4);
+                    else
+                    {
+                        LogError("We couldn't find the item we where looking for.\n" +
+                                 $"ItemName: {item.ItemName}.\n" +
+                                 $"Inventory Position: ({item.InventPosX},{item.InventPosY})", 5);
+                    }
+
+                    //Thread.Sleep(200);
+                    if (!UpdateStashes())
+                        LogError("There was item drop but it don't want to update stash!", 10);
                 }
 
-                Keyboard.KeyUp(Keys.LControlKey);
+                CleanUp();
 
-                //part.RemovePreparedItems();
+                UpdatePlayerInventory();
+                UpdateItemsSetsInfo();
+
+                Mouse.SetCursorPos(cursorPosPreMoving);
+
             }
-
-            UpdatePlayerInventory();
-            UpdateItemsSetsInfo();
-
-            Mouse.SetCursorPos(cursorPosPreMoving);
         }
-
+       
         private void DrawSetsInfo()
         {
             var stash = GameController.IngameState.IngameUi.StashElement;
@@ -527,7 +561,7 @@ namespace FullRareSetManager
                                     var foundItem =
                                         visibleInventoryItems.FirstOrDefault(x => x.PositionNum.X == item.InventPosX && x.PositionNum.Y == item.InventPosY);
 
-                                   // LogError($"ItemRect1 {GameController.Files.BaseItemTypes.Translate(item.Metadata).BaseNamefoundItem.Item}");
+                                    // LogError($"ItemRect1 {GameController.Files.BaseItemTypes.Translate(item.Metadata).BaseNamefoundItem.Item}");
                                     if (foundItem != null)
                                         Graphics.DrawFrame(foundItem.GetClientRect(), Color.Yellow, 2);
                                 }
@@ -572,14 +606,14 @@ namespace FullRareSetManager
             _currentSetData = new CurrentSetInfo();
 
             _itemSetTypes = new BaseSetPart[8];
-            _itemSetTypes[0] = new WeaponItemsSetPart("Weapons") {ItemCellsSize = 8};
-            _itemSetTypes[1] = new SingleItemSetPart("Helmets") {ItemCellsSize = 4};
-            _itemSetTypes[2] = new SingleItemSetPart("Body Armors") {ItemCellsSize = 6};
-            _itemSetTypes[3] = new SingleItemSetPart("Gloves") {ItemCellsSize = 4};
-            _itemSetTypes[4] = new SingleItemSetPart("Boots") {ItemCellsSize = 4};
-            _itemSetTypes[5] = new SingleItemSetPart("Belts") {ItemCellsSize = 2};
-            _itemSetTypes[6] = new SingleItemSetPart("Amulets") {ItemCellsSize = 1};
-            _itemSetTypes[7] = new RingItemsSetPart("Rings") {ItemCellsSize = 1};
+            _itemSetTypes[0] = new WeaponItemsSetPart("Weapons") { ItemCellsSize = 8 };
+            _itemSetTypes[1] = new SingleItemSetPart("Helmets") { ItemCellsSize = 4 };
+            _itemSetTypes[2] = new SingleItemSetPart("Body Armors") { ItemCellsSize = 6 };
+            _itemSetTypes[3] = new SingleItemSetPart("Gloves") { ItemCellsSize = 4 };
+            _itemSetTypes[4] = new SingleItemSetPart("Boots") { ItemCellsSize = 4 };
+            _itemSetTypes[5] = new SingleItemSetPart("Belts") { ItemCellsSize = 2 };
+            _itemSetTypes[6] = new SingleItemSetPart("Amulets") { ItemCellsSize = 1 };
+            _itemSetTypes[7] = new RingItemsSetPart("Rings") { ItemCellsSize = 1 };
 
             for (var i = 0; i <= 7; i++)
             {
@@ -588,7 +622,7 @@ namespace FullRareSetManager
 
             foreach (var item in _sData.PlayerInventory.StashTabItems)
             {
-                var index = (int) item.ItemType;
+                var index = (int)item.ItemType;
 
                 if (index > 7)
                     index = 0; // Switch One/TwoHanded to 0(weapon)
@@ -606,7 +640,7 @@ namespace FullRareSetManager
 
                 foreach (var item in stashTabItems)
                 {
-                    var index = (int) item.ItemType;
+                    var index = (int)item.ItemType;
                     if (index == -1) continue;
                     if (index > 7)
                         index = 0; // Switch One/TwoHanded to 0(weapon)
@@ -661,7 +695,7 @@ namespace FullRareSetManager
                     if (drawInfo.FreeSpaceCount < 0)
                         drawInfo.FreeSpaceCount = 0;
 
-                    drawInfo.PriorityPercent = (float) drawInfo.FreeSpaceCount / totalPossibleStashItemsCount;
+                    drawInfo.PriorityPercent = (float)drawInfo.FreeSpaceCount / totalPossibleStashItemsCount;
 
                     if (drawInfo.PriorityPercent > 1)
                         drawInfo.PriorityPercent = 1;
@@ -685,7 +719,7 @@ namespace FullRareSetManager
                         drawInfo.PriorityPercent = 0;
                     else
                     {
-                        drawInfo.PriorityPercent = (float) drawInfo.TotalCount / maxSets;
+                        drawInfo.PriorityPercent = (float)drawInfo.TotalCount / maxSets;
 
                         if (drawInfo.PriorityPercent > 1)
                             drawInfo.PriorityPercent = 1;
@@ -836,7 +870,7 @@ namespace FullRareSetManager
                 if (_currentOpenedStashTab.Address == stash.Address)//in case tab was closed before we finish update
                 {
                     curStashData.StashTabItems = items;
-                    curStashData.ItemsCount = (int) stash.ItemCount;
+                    curStashData.ItemsCount = (int)stash.ItemCount;
                 }
 
                 if (add && curStashData.ItemsCount > 0)
@@ -851,8 +885,8 @@ namespace FullRareSetManager
 
         private bool UpdatePlayerInventory()
         {
-        //    if (!GameController.Game.IngameState.IngameUi.InventoryPanel.IsVisible)
-        //        return false;
+            //    if (!GameController.Game.IngameState.IngameUi.InventoryPanel.IsVisible)
+            //        return false;
 
             var inventory = GameController.Game.IngameState.ServerData.PlayerInventories[0].Inventory;
 
@@ -875,17 +909,17 @@ namespace FullRareSetManager
                 newAddedItem.InventPosY = (int)invItem.InventoryPositionNum.Y;
                 newAddedItem.BInPlayerInventory = true;
                 _sData.PlayerInventory.StashTabItems.Add(newAddedItem);
-               
+
             }
 
-            _sData.PlayerInventory.ItemsCount = (int) inventory.ItemCount;
+            _sData.PlayerInventory.ItemsCount = (int)inventory.ItemCount;
 
             return true;
         }
 
         private StashItem ProcessItem(Entity item)
         {
-           // LogError("Entrou");
+            // LogError("Entrou");
             try
             {
                 if (item == null) return null;
@@ -945,6 +979,51 @@ namespace FullRareSetManager
             return null;
         }
 
+
+        private IEnumerator SwitchToTabViaArrowKeys(int tabIndex, int numberOfTries = 1)
+        {
+            if (numberOfTries > 50)
+            {
+                LogError("Out of range tries");
+                yield break;
+            }
+
+            var indexOfCurrentVisibleTab = GetIndexOfCurrentVisibleTab();
+            var travelDistance = tabIndex - indexOfCurrentVisibleTab;
+            var tabIsToTheLeft = travelDistance < 0;
+            travelDistance = Math.Abs(travelDistance);
+
+            LogError($"Current Stash {indexOfCurrentVisibleTab}");
+
+            Keyboard.KeyPress(tabIsToTheLeft ? Keys.Left : Keys.Right);
+            yield return Delay(20);
+
+
+            if (GetIndexOfCurrentVisibleTab() != tabIndex)
+            {
+                yield return Delay(20);
+                yield return SwitchToTabViaArrowKeys(tabIndex, numberOfTries + 1);
+            }
+        }
+
+
+        private void CleanUp()
+        {
+            Keyboard.KeyUp(Keys.LControlKey);
+            Keyboard.KeyUp(Keys.Shift);
+
+        }
+
+
+        private int GetIndexOfCurrentVisibleTab()
+        {
+            return GameController.Game.IngameState.IngameUi.StashElement.IndexVisibleStash;
+        }
+
+        private IEnumerator Delay(int ms = 0)
+        {
+            yield return new WaitTime(Settings.ExtraDelay + ms);
+        }
         private StashItemType GetStashItemTypeByClassName(string className)
         {
             if (className.StartsWith("Two Hand"))
@@ -962,10 +1041,10 @@ namespace FullRareSetManager
                 case "Dagger": return StashItemType.OneHanded;
                 case "Claw": return StashItemType.OneHanded;
                 case "Shield": return StashItemType.OneHanded;
-				case "Rune Dagger": return StashItemType.OneHanded;
-				case "Warstaff": return StashItemType.TwoHanded;
+                case "Rune Dagger": return StashItemType.OneHanded;
+                case "Warstaff": return StashItemType.TwoHanded;
 
-				case "Ring": return StashItemType.Ring;
+                case "Ring": return StashItemType.Ring;
                 case "Amulet": return StashItemType.Amulet;
                 case "Belt": return StashItemType.Belt;
 
@@ -1112,7 +1191,7 @@ namespace FullRareSetManager
                 var visitResult = ProcessItem(item);
 
                 if (visitResult == null) continue;
-                var index = (int) visitResult.ItemType;
+                var index = (int)visitResult.ItemType;
 
                 if (index > 7)
                     index = 0;
@@ -1158,7 +1237,7 @@ namespace FullRareSetManager
                 var incrSize = Settings.BorderOversize.Value;
 
                 if (Settings.BorderAutoResize.Value)
-                    incrSize = (int) Lerp(incrSize, 1, data.PriorityPercent);
+                    incrSize = (int)Lerp(incrSize, 1, data.PriorityPercent);
 
                 rect.X -= incrSize;
                 rect.Y -= incrSize;
@@ -1171,7 +1250,7 @@ namespace FullRareSetManager
                 var borderWidth = Settings.BorderWidth.Value;
 
                 if (Settings.BorderAutoResize.Value)
-                    borderWidth = (int) Lerp(borderWidth, 1, data.PriorityPercent);
+                    borderWidth = (int)Lerp(borderWidth, 1, data.PriorityPercent);
 
                 Graphics.DrawFrame(rect, borderColor, borderWidth);
 
@@ -1199,6 +1278,23 @@ namespace FullRareSetManager
             return shouldUpdate;
         }
 
+        public IEnumerator SwitchToTab(int tabIndex)
+        {
+            // We don't want to Switch to a tab that we are already on or that has the magic number for affinities
+            //var stashPanel = GameController.Game.IngameState.IngameUi.StashElement;
+
+            _visibleStashIndex = GetIndexOfCurrentVisibleTab();
+            var travelDistance = Math.Abs(tabIndex - _visibleStashIndex);
+            if (travelDistance == 0) yield break;
+            yield return SwitchToTabViaArrowKeys(tabIndex);
+            yield return Delay(20);
+        }
+        private void StopCoroutine(string routineName)
+        {
+            var routine = Core.ParallelRunner.FindByName(routineName);
+            routine?.Done();
+            CleanUp();
+        }
         private float Lerp(float a, float b, float f)
         {
             return a + f * (b - a);
